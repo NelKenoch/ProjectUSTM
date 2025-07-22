@@ -1,0 +1,123 @@
+# SMARTLEARN USTM - Interface complète avec entrée directe de texte
+# Version optimisée pour Colab avec GPT-2
+
+!pip install -q transformers torch gradio PyPDF2
+
+from transformers import pipeline, set_seed
+from PyPDF2 import PdfReader
+import gradio as gr
+import torch
+import textwrap
+import time
+
+# Initialisation du modèle GPT-2
+def init_model():
+    print("Initialisation du modèle GPT-2...")
+    return pipeline(
+        "text-generation",
+        model="gpt2",
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+    )
+
+qcm_generator = init_model()
+set_seed(42)
+
+# Fonction de génération de QCM améliorée
+def generate_qcm(topic, use_pdf=False, file_content=None):
+    try:
+        if use_pdf and file_content:
+            # Extraction du texte depuis le PDF
+            start_time = time.time()
+            text = extract_text_from_pdf(file_content)
+            if not text:
+                return "Erreur: Impossible de lire le PDF"
+            prompt = f"Génère 3 QCM universitaires basés sur ce contenu:\n{text[:2000]}\n\n1."
+            print(f"Temps d'extraction PDF: {time.time()-start_time:.2f}s")
+        else:
+            # Utilisation du texte direct
+            prompt = f"Crée 3 QCM universitaires sur: {topic}\n\n1."
+        
+        start_gen = time.time()
+        response = qcm_generator(
+            prompt,
+            max_length=600,
+            temperature=0.7,
+            num_return_sequences=1,
+            do_sample=True,
+            pad_token_id=50256
+        )
+        print(f"Temps de génération: {time.time()-start_gen:.2f}s")
+        
+        result = "1." + response[0]['generated_text'].split("1.")[1]
+        return format_output(result)
+    
+    except Exception as e:
+        return f"Erreur: {str(e)}"
+
+# Fonction d'extraction PDF
+def extract_text_from_pdf(file_content):
+    try:
+        with open("temp.pdf", "wb") as f:
+            f.write(file_content)
+        reader = PdfReader("temp.pdf")
+        text = ""
+        for page in reader.pages[:5]:  # Limite à 5 pages
+            text += page.extract_text() or ""
+        return text[:5000]  # Limite à 5000 caractères
+    except Exception as e:
+        print(f"Erreur PDF: {str(e)}")
+        return None
+
+# Formatage du résultat
+def format_output(text):
+    lines = []
+    current_line = ""
+    
+    for word in text.split():
+        if len(current_line + word) <= 80:
+            current_line += f"{word} "
+        else:
+            lines.append(current_line)
+            current_line = f"{word} "
+    
+    if current_line:
+        lines.append(current_line)
+    
+    return "\n".join(lines)
+
+# Interface Gradio améliorée
+with gr.Blocks(title="SmartLearn USTM - Générateur de QCM") as app:
+    gr.Markdown("""
+    # 📚 SmartLearn USTM
+    ## Générateur de QCM par IA
+    """)
+    
+    with gr.Tabs():
+        with gr.TabItem("Depuis texte"):
+            text_input = gr.Textbox(label="Sujet ou contenu du cours", lines=5, 
+                                  placeholder="Coller le texte du cours ici...")
+            text_button = gr.Button("Générer QCM")
+            text_output = gr.Textbox(label="QCM Généré", interactive=False, lines=10)
+        
+        with gr.TabItem("Depuis PDF"):
+            file_input = gr.File(label="Uploader un PDF", type="binary")
+            file_button = gr.Button("Extraire et générer")
+            file_output = gr.Textbox(label="QCM Généré", interactive=False, lines=10)
+    
+    # Actions
+    text_button.click(
+        fn=generate_qcm,
+        inputs=[text_input, gr.Checkbox(value=False, visible=False), gr.File(visible=False)],
+        outputs=text_output
+    )
+    
+    file_button.click(
+        fn=generate_qcm,
+        inputs=[gr.Textbox(visible=False), gr.Checkbox(value=True, visible=False), file_input],
+        outputs=file_output
+    )
+
+# Lancement de l'interface
+print("Lancement de l'interface...")
+app.launch(share=True, debug=True)
