@@ -1,123 +1,215 @@
-# SMARTLEARN USTM - Interface complète avec entrée directe de texte
-# Version optimisée pour Colab avec GPT-2
+# SMARTLEARN USTM - Système expert complet avec auto-enrichissement
+!pip install -q transformers torch faiss-gpu gradio PyPDF2 sentence-transformers spacy
+!python -m spacy download fr_core_news_sm
 
-!pip install -q transformers torch gradio PyPDF2
-
-from transformers import pipeline, set_seed
-from PyPDF2 import PdfReader
+import json
+import numpy as np
+import faiss
+import spacy
+from sentence_transformers import SentenceTransformer
+from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer
 import gradio as gr
-import torch
-import textwrap
-import time
+from datetime import datetime
 
-# Initialisation du modèle GPT-2
-def init_model():
-    print("Initialisation du modèle GPT-2...")
-    return pipeline(
-        "text-generation",
-        model="gpt2",
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
-    )
-
-qcm_generator = init_model()
-set_seed(42)
-
-# Fonction de génération de QCM améliorée
-def generate_qcm(topic, use_pdf=False, file_content=None):
-    try:
-        if use_pdf and file_content:
-            # Extraction du texte depuis le PDF
-            start_time = time.time()
-            text = extract_text_from_pdf(file_content)
-            if not text:
-                return "Erreur: Impossible de lire le PDF"
-            prompt = f"Génère 3 QCM universitaires basés sur ce contenu:\n{text[:2000]}\n\n1."
-            print(f"Temps d'extraction PDF: {time.time()-start_time:.2f}s")
-        else:
-            # Utilisation du texte direct
-            prompt = f"Crée 3 QCM universitaires sur: {topic}\n\n1."
+# 1. Initialisation des modèles
+class KnowledgeSystem:
+    def __init__(self):
+        print("Chargement des modèles...")
+        # Modèle de base
+        self.embedder = SentenceTransformer('all-mpnet-base-v2')
+        self.generator = pipeline("text-generation", model="gpt2")
         
-        start_gen = time.time()
-        response = qcm_generator(
-            prompt,
-            max_length=600,
-            temperature=0.7,
-            num_return_sequences=1,
-            do_sample=True,
-            pad_token_id=50256
-        )
-        print(f"Temps de génération: {time.time()-start_gen:.2f}s")
+        # Modèles pour l'extension automatique
+        self.nlp = spacy.load("fr_core_news_sm")
+        self.summarizer = pipeline("summarization", model="plguillou/t5-base-fr-sum-cnndm")
         
-        result = "1." + response[0]['generated_text'].split("1.")[1]
-        return format_output(result)
+        # Base de connaissances
+        self.knowledge_base = {}
+        self.knowledge_keys = []
+        self.index = faiss.IndexFlatL2(768)
+        self._load_knowledge()
     
-    except Exception as e:
-        return f"Erreur: {str(e)}"
+    # 2. Fonctions de base
+    def _load_knowledge(self):
+        """Charge la base depuis le fichier JSON"""
+        try:
+            with open("knowledge_base.json", "r") as f:
+                self.knowledge_base = json.load(f)
+                self._rebuild_index()
+            print(f"Base chargée avec {len(self.knowledge_base)} entrées")
+        except FileNotFoundError:
+            self.knowledge_base = {
+                "lois_de_newton": {
+                    "description": "Les trois lois de Newton",
+                    "contenu": "1. Loi d'inertie\n2. F=ma\n3. Action-réaction",
+                    "metadata": {
+                        "source": "manuel_physique_USTM",
+                        "date_ajout": "2023-01-15"
+                    }
+                }
+            }
+            self._save_knowledge()
+    
+    def _rebuild_index(self):
+        """Reconstruit l'index FAISS"""
+        self.knowledge_keys = list(self.knowledge_base.keys())
+        embeddings = []
+        for key in self.knowledge_keys:
+            text = f"{self.knowledge_base[key]['description']} {self.knowledge_base[key]['contenu']}"
+            embeddings.append(self.embedder.encode(text))
+        if embeddings:
+            self.index.add(np.array(embeddings))
+    
+    def _save_knowledge(self):
+        """Sauvegarde la base dans un fichier JSON"""
+        with open("knowledge_base.json", "w") as f:
+            json.dump(self.knowledge_base, f, indent=2)
+    
+    # 3. Fonctions principales
+    def generate_qcm(self, topic):
+        """Génère un QCM contextualisé"""
+        context = self._get_context(topic)
+        prompt = f"""Génère 3 QCM universitaires sur: {topic}
+Contexte:
+{context}
 
-# Fonction d'extraction PDF
-def extract_text_from_pdf(file_content):
-    try:
-        with open("temp.pdf", "wb") as f:
-            f.write(file_content)
-        reader = PdfReader("temp.pdf")
+Format:
+Question 1: [énoncé clair et précis]
+a) Option plausible
+b) Option incorrecte
+c) Option pertinente
+d) Option spécifique
+Réponse: [lettre]
+
+QCM:"""
+        response = self.generator(prompt, max_length=600, temperature=0.6)
+        return response[0]['generated_text']
+    
+    def _get_context(self, query, k=3):
+        """Récupère les connaissances pertinentes"""
+        query_embed = self.embedder.encode(query)
+        distances, indices = self.index.search(np.array([query_embed]), k)
+        
+        context = []
+        for i in indices[0]:
+            if i >= 0:
+                key = self.knowledge_keys[i]
+                context.append(f"### {self.knowledge_base[key]['description']}\n{self.knowledge_base[key]['contenu']}")
+        return "\n\n".join(context)
+    
+    # 4. Fonctions d'extension (Nouvelles)
+    def auto_extract_concepts(self, text, source_name):
+        """Extrait automatiquement des concepts d'un texte"""
+        doc = self.nlp(text)
+        concepts = []
+        
+        # Extraction des phrases importantes
+        sentences = [sent.text for sent in doc.sents]
+        important_sents = self.summarizer(
+            " ".join(sentences),
+            max_length=150,
+            min_length=30,
+            do_sample=False
+        )[0]['summary_text']
+        
+        # Extraction des entités nommées
+        entities = [(ent.text, ent.label_) for ent in doc.ents]
+        
+        # Création des nouvelles entrées
+        today = datetime.now().strftime("%Y-%m-%d")
+        for i, sent in enumerate(important_sents.split(". ")):
+            if len(sent) > 20:
+                concept_id = f"{source_name}_concept_{i}"
+                self.knowledge_base[concept_id] = {
+                    "description": f"Concept extrait de {source_name}",
+                    "contenu": sent,
+                    "metadata": {
+                        "source": source_name,
+                        "date_ajout": today,
+                        "type": "auto-extracted"
+                    }
+                }
+                concepts.append(concept_id)
+        
+        if concepts:
+            self._rebuild_index()
+            self._save_knowledge()
+        return concepts
+    
+    def process_pdf(self, file_bytes, source_name):
+        """Traite un PDF et extrait les connaissances"""
+        from PyPDF2 import PdfReader
+        import io
+        
         text = ""
-        for page in reader.pages[:5]:  # Limite à 5 pages
-            text += page.extract_text() or ""
-        return text[:5000]  # Limite à 5000 caractères
-    except Exception as e:
-        print(f"Erreur PDF: {str(e)}")
-        return None
+        try:
+            reader = PdfReader(io.BytesIO(file_bytes))
+            for page in reader.pages[:5]:  # Limite à 5 pages
+                text += page.extract_text() or ""
+            return self.auto_extract_concepts(text[:5000], source_name)
+        except Exception as e:
+            return f"Erreur: {str(e)}"
+    
+    def validate_content(self, concept_id, user_feedback):
+        """Valide ou corrige une entrée"""
+        if concept_id in self.knowledge_base:
+            self.knowledge_base[concept_id]["metadata"]["feedback"] = user_feedback
+            if "incorrect" in user_feedback.lower():
+                self.knowledge_base[concept_id]["metadata"]["status"] = "à_reviser"
+            self._save_knowledge()
+            return "Merci pour votre feedback!"
+        return "Concept introuvable"
 
-# Formatage du résultat
-def format_output(text):
-    lines = []
-    current_line = ""
-    
-    for word in text.split():
-        if len(current_line + word) <= 80:
-            current_line += f"{word} "
-        else:
-            lines.append(current_line)
-            current_line = f"{word} "
-    
-    if current_line:
-        lines.append(current_line)
-    
-    return "\n".join(lines)
+# 5. Interface complète
+system = KnowledgeSystem()
 
-# Interface Gradio améliorée
-with gr.Blocks(title="SmartLearn USTM - Générateur de QCM") as app:
-    gr.Markdown("""
-    # 📚 SmartLearn USTM
-    ## Générateur de QCM par IA
-    """)
+with gr.Blocks(title="SmartLearn USTM - Système Expert") as app:
+    gr.Markdown("# 🧠 SmartLearn USTM - Plateforme Pédagogique Intelligente")
     
     with gr.Tabs():
-        with gr.TabItem("Depuis texte"):
-            text_input = gr.Textbox(label="Sujet ou contenu du cours", lines=5, 
-                                  placeholder="Coller le texte du cours ici...")
-            text_button = gr.Button("Générer QCM")
-            text_output = gr.Textbox(label="QCM Généré", interactive=False, lines=10)
+        with gr.Tab("Génération de QCM"):
+            gr.Markdown("## Générer des QCM basés sur les connaissances")
+            topic_input = gr.Textbox(label="Sujet ou concept")
+            generate_btn = gr.Button("Générer QCM")
+            qcm_output = gr.Textbox(label="Résultat", interactive=True)
         
-        with gr.TabItem("Depuis PDF"):
-            file_input = gr.File(label="Uploader un PDF", type="binary")
-            file_button = gr.Button("Extraire et générer")
-            file_output = gr.Textbox(label="QCM Généré", interactive=False, lines=10)
-    
-    # Actions
-    text_button.click(
-        fn=generate_qcm,
-        inputs=[text_input, gr.Checkbox(value=False, visible=False), gr.File(visible=False)],
-        outputs=text_output
+        with gr.Tab("Enrichissement Automatique"):
+            gr.Markdown("## Ajouter des connaissances depuis des documents")
+            with gr.Row():
+                doc_input = gr.File(label="Document PDF")
+                source_input = gr.Textbox(label="Source (ex: 'Cours_Physique_L1')")
+            auto_extract_btn = gr.Button("Extraire les concepts")
+            concepts_output = gr.JSON(label="Concepts extraits")
+        
+        with gr.Tab("Validation Collaborative"):
+            gr.Markdown("## Améliorer la qualité des connaissances")
+            concept_select = gr.Dropdown(
+                choices=list(system.knowledge_base.keys()),
+                label="Sélectionner un concept"
+            )
+            feedback_input = gr.Textbox(label="Votre feedback")
+            validate_btn = gr.Button("Soumettre")
+            validation_output = gr.Textbox(label="Statut")
+
+    # Liaisons des fonctions
+    generate_btn.click(
+        fn=system.generate_qcm,
+        inputs=topic_input,
+        outputs=qcm_output
     )
     
-    file_button.click(
-        fn=generate_qcm,
-        inputs=[gr.Textbox(visible=False), gr.Checkbox(value=True, visible=False), file_input],
-        outputs=file_output
+    auto_extract_btn.click(
+        fn=system.process_pdf,
+        inputs=[doc_input, source_input],
+        outputs=concepts_output
+    )
+    
+    validate_btn.click(
+        fn=system.validate_content,
+        inputs=[concept_select, feedback_input],
+        outputs=validation_output
     )
 
-# Lancement de l'interface
-print("Lancement de l'interface...")
+# Lancement
+print("Prêt! Accédez à l'interface via le lien Gradio")
 app.launch(share=True, debug=True)
