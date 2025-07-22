@@ -1,0 +1,56 @@
+Fonctionnalités clés intégrées :
+Auto-extraction des concepts :
+
+Analyse sémantique avec spaCy
+
+Summarization automatique
+
+Détection d'entités nommées
+
+Traitement intelligent des PDF :
+
+Extraction texte
+
+Découpage en concepts
+
+Métadonnées automatiques
+
+Validation collaborative :
+
+Système de feedback
+
+Marquage des contenus à réviser
+
+Historique des modifications
+
+Gestion avancée des connaissances :
+
+Indexation vectorielle
+
+Recherche contextuelle
+
+Versioning des contenus
+
+Comment l'utiliser :
+Génération de QCM :
+
+Saisissez un sujet
+
+Le système contextualise avec la base
+
+Enrichissement automatique :
+
+Uploader un PDF
+
+Les concepts sont extraits et indexés
+
+Validation :
+
+Sélectionnez un concept
+
+Donnez votre feedback
+
+Améliorez la qualité
+
+Ce système évolue automatiquement grâce aux interactions et peut s'intégrer avec Moodle ou d'autres LMS via des APIs supplémentaires.
+
